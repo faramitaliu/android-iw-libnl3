@@ -133,6 +133,7 @@ static const char *ifmodes[NL80211_IFTYPE_MAX + 1] = {
 	"P2P-client",
 	"P2P-GO",
 	"P2P-device",
+	"outside context of a BSS",
 };
 
 static char modebuf[100];
@@ -248,6 +249,17 @@ static const char *commands[NL80211_CMD_MAX + 1] = {
 	[NL80211_CMD_FT_EVENT] = "ft_event",
 	[NL80211_CMD_CRIT_PROTOCOL_START] = "crit_protocol_start",
 	[NL80211_CMD_CRIT_PROTOCOL_STOP] = "crit_protocol_stop",
+	[NL80211_CMD_GET_COALESCE] = "get_coalesce",
+	[NL80211_CMD_SET_COALESCE] = "set_coalesce",
+	[NL80211_CMD_CHANNEL_SWITCH] = "channel_switch",
+	[NL80211_CMD_VENDOR] = "vendor",
+	[NL80211_CMD_SET_QOS_MAP] = "set_qos_map",
+	[NL80211_CMD_ADD_TX_TS] = "add_tx_ts",
+	[NL80211_CMD_DEL_TX_TS] = "del_tx_ts",
+	[NL80211_CMD_GET_MPP] = "get_mpp",
+	[NL80211_CMD_JOIN_OCB] = "join_ocb",
+	[NL80211_CMD_LEAVE_OCB] = "leave_ocb",
+	[NL80211_CMD_CH_SWITCH_STARTED_NOTIFY] = "ch_switch_started_notify",
 };
 
 static char cmdbuf[100];
@@ -590,7 +602,7 @@ void print_ht_mcs(const __u8 *mcs)
 	unsigned int tx_max_num_spatial_streams, max_rx_supp_data_rate;
 	bool tx_mcs_set_defined, tx_mcs_set_equal, tx_unequal_modulation;
 
-	max_rx_supp_data_rate = (mcs[10] & ((mcs[11] & 0x3) << 8));
+	max_rx_supp_data_rate = (mcs[10] | ((mcs[11] & 0x3) << 8));
 	tx_mcs_set_defined = !!(mcs[12] & (1 << 0));
 	tx_mcs_set_equal = !(mcs[12] & (1 << 1));
 	tx_max_num_spatial_streams = ((mcs[12] >> 2) & 3) + 1;
@@ -667,8 +679,8 @@ void print_vht_info(__u32 capa, const __u8 *mcs)
 	PRINT_VHT_CAPA(22, "+HTC-VHT");
 	/* max A-MPDU */
 	/* VHT link adaptation */
-	PRINT_VHT_CAPA(29, "RX antenna pattern consistency");
-	PRINT_VHT_CAPA(30, "TX antenna pattern consistency");
+	PRINT_VHT_CAPA(28, "RX antenna pattern consistency");
+	PRINT_VHT_CAPA(29, "TX antenna pattern consistency");
 
 	printf("\t\tVHT RX MCS set:\n");
 	tmp = mcs[0] | (mcs[1] << 8);
@@ -697,4 +709,17 @@ void print_vht_info(__u32 capa, const __u8 *mcs)
 	}
 	tmp = mcs[6] | (mcs[7] << 8);
 	printf("\t\tVHT TX highest supported: %d Mbps\n", tmp & 0x1fff);
+}
+
+void iw_hexdump(const char *prefix, const __u8 *buf, size_t size)
+{
+	int i;
+
+	printf("%s: ", prefix);
+	for (i = 0; i < size; i++) {
+		if (i && i % 16 == 0)
+			printf("\n%s: ", prefix);
+		printf("%02x ", buf[i]);
+	}
+	printf("\n\n");
 }

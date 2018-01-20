@@ -171,6 +171,11 @@ void print_ies(unsigned char *ie, int ielen, bool unknown,
 	       enum print_ie_type ptype);
 
 void parse_bitrate(struct nlattr *bitrate_attr, char *buf, int buflen);
+void iw_hexdump(const char *prefix, const __u8 *data, size_t len);
+
+#define SCHED_SCAN_OPTIONS "interval <in_msecs> [delay <in_secs>] " \
+	"[freqs <freq>+] [matches [ssid <ssid>]+]] [active [ssid <ssid>]+|passive] [randomise[=<addr>/<mask>]]"
+int parse_sched_scan(struct nl_msg *msg, int *argc, char ***argv);
 
 DECLARE_SECTION(set);
 DECLARE_SECTION(get);

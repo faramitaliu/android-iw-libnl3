@@ -70,6 +70,272 @@ union ieee80211_country_ie_triplet {
 	} __attribute__ ((packed)) ext;
 } __attribute__ ((packed));
 
+static int parse_random_mac_addr(struct nl_msg *msg, char *arg)
+{
+	char *a_addr, *a_mask, *sep;
+	unsigned char addr[ETH_ALEN], mask[ETH_ALEN];
+	char *addrs = arg + 9;
+
+	if (*addrs != '=')
+		return 0;
+
+	addrs++;
+	sep = strchr(addrs, '/');
+	a_addr = addrs;
+
+	if (!sep)
+		return 1;
+
+	*sep = 0;
+	a_mask = sep + 1;
+	if (mac_addr_a2n(addr, a_addr) || mac_addr_a2n(mask, a_mask))
+		return 1;
+
+	NLA_PUT(msg, NL80211_ATTR_MAC, ETH_ALEN, addr);
+	NLA_PUT(msg, NL80211_ATTR_MAC_MASK, ETH_ALEN, mask);
+
+	return 0;
+ nla_put_failure:
+	return -ENOBUFS;
+}
+
+int parse_sched_scan(struct nl_msg *msg, int *argc, char ***argv)
+{
+	struct nl_msg *matchset = NULL, *freqs = NULL, *ssids = NULL;
+	struct nlattr *match = NULL;
+	enum {
+		ND_TOPLEVEL,
+		ND_MATCH,
+		ND_FREQS,
+		ND_ACTIVE,
+	} parse_state = ND_TOPLEVEL;
+	int c  = *argc;
+	char *end, **v = *argv;
+	int err = 0, i = 0;
+	unsigned int freq, interval = 0, delay = 0;
+	bool have_matchset = false, have_freqs = false, have_ssids = false;
+	bool have_active = false, have_passive = false;
+	uint32_t flags = 0;
+
+	matchset = nlmsg_alloc();
+	if (!matchset) {
+		err = -ENOBUFS;
+		goto out;
+	}
+
+	freqs = nlmsg_alloc();
+	if (!freqs) {
+		err = -ENOBUFS;
+		goto out;
+	}
+
+	ssids = nlmsg_alloc();
+	if (!ssids) {
+		err = -ENOMEM;
+		goto out;
+	}
+
+	while (c) {
+		switch (parse_state) {
+		case ND_TOPLEVEL:
+			if (!strcmp(v[0], "interval")) {
+				c--; v++;
+				if (c == 0) {
+					err = -EINVAL;
+					goto nla_put_failure;
+				}
+
+				if (interval) {
+					err = -EINVAL;
+					goto nla_put_failure;
+				}
+				interval = strtoul(v[0], &end, 10);
+				if (*end || !interval) {
+					err = -EINVAL;
+					goto nla_put_failure;
+				}
+				NLA_PUT_U32(msg,
+					    NL80211_ATTR_SCHED_SCAN_INTERVAL,
+					    interval);
+			} else if (!strcmp(v[0], "delay")) {
+				c--; v++;
+				if (c == 0) {
+					err = -EINVAL;
+					goto nla_put_failure;
+				}
+
+				if (delay) {
+					err = -EINVAL;
+					goto nla_put_failure;
+				}
+				delay = strtoul(v[0], &end, 10);
+				if (*end) {
+					err = -EINVAL;
+					goto nla_put_failure;
+				}
+				NLA_PUT_U32(msg,
+					    NL80211_ATTR_SCHED_SCAN_DELAY,
+					    delay);
+			} else if (!strcmp(v[0], "matches")) {
+				parse_state = ND_MATCH;
+				if (have_matchset) {
+					err = -EINVAL;
+					goto nla_put_failure;
+				}
+
+				i = 0;
+			} else if (!strcmp(v[0], "freqs")) {
+				parse_state = ND_FREQS;
+				if (have_freqs) {
+					err = -EINVAL;
+					goto nla_put_failure;
+				}
+
+				have_freqs = true;
+				i = 0;
+			} else if (!strcmp(v[0], "active")) {
+				parse_state = ND_ACTIVE;
+				if (have_active || have_passive) {
+					err = -EINVAL;
+					goto nla_put_failure;
+				}
+
+				have_active = true;
+				i = 0;
+			} else if (!strcmp(v[0], "passive")) {
+				if (have_active || have_passive) {
+					err = -EINVAL;
+					goto nla_put_failure;
+				}
+
+				have_passive = true;
+			} else if (!strncmp(v[0], "randomise", 9) ||
+				   !strncmp(v[0], "randomize", 9)) {
+				flags |= NL80211_SCAN_FLAG_RANDOM_ADDR;
+				if (c > 0) {
+					err = parse_random_mac_addr(msg, v[0]);
+					if (err)
+						goto nla_put_failure;
+				}
+			} else {
+				/* this element is not for us, so
+				 * return to continue parsing.
+				 */
+				goto nla_put_failure;
+			}
+			c--; v++;
+
+			break;
+		case ND_MATCH:
+			if (!strcmp(v[0], "ssid")) {
+				c--; v++;
+				if (c == 0) {
+					err = -EINVAL;
+					goto nla_put_failure;
+				}
+
+				/* TODO: for now we can only have an
+				 * SSID in the match, so we can start
+				 * the match nest here.
+				 */
+				match = nla_nest_start(matchset, i);
+				if (!match) {
+					err = -ENOBUFS;
+					goto nla_put_failure;
+				}
+
+				NLA_PUT(matchset,
+					NL80211_SCHED_SCAN_MATCH_ATTR_SSID,
+					strlen(v[0]), v[0]);
+				nla_nest_end(matchset, match);
+				match = NULL;
+
+				have_matchset = true;
+				i++;
+				c--; v++;
+			} else {
+				/* other element that cannot be part
+				 * of a match indicates the end of the
+				 * match. */
+				/* need at least one match in the matchset */
+				if (i == 0) {
+					err = -EINVAL;
+					goto nla_put_failure;
+				}
+
+				parse_state = ND_TOPLEVEL;
+			}
+
+			break;
+		case ND_FREQS:
+			freq = strtoul(v[0], &end, 10);
+			if (*end) {
+				if (i == 0) {
+					err = -EINVAL;
+					goto nla_put_failure;
+				}
+
+				parse_state = ND_TOPLEVEL;
+			} else {
+				NLA_PUT_U32(freqs, i, freq);
+				i++;
+				c--; v++;
+			}
+			break;
+		case ND_ACTIVE:
+			if (!strcmp(v[0], "ssid")) {
+				c--; v++;
+				if (c == 0) {
+					err = -EINVAL;
+					goto nla_put_failure;
+				}
+
+				NLA_PUT(ssids,
+					NL80211_SCHED_SCAN_MATCH_ATTR_SSID,
+					strlen(v[0]), v[0]);
+
+				have_ssids = true;
+				i++;
+				c--; v++;
+			} else {
+				/* other element that cannot be part
+				 * of a match indicates the end of the
+				 * active set. */
+				/* need at least one item in the set */
+				if (i == 0) {
+					err = -EINVAL;
+					goto nla_put_failure;
+				}
+
+				parse_state = ND_TOPLEVEL;
+			}
+			break;
+		}
+	}
+
+	if (!have_ssids)
+		NLA_PUT(ssids, 1, 0, "");
+	if (!have_passive)
+		nla_put_nested(msg, NL80211_ATTR_SCAN_SSIDS, ssids);
+	if (have_freqs)
+		nla_put_nested(msg, NL80211_ATTR_SCAN_FREQUENCIES, freqs);
+	if (have_matchset)
+		nla_put_nested(msg, NL80211_ATTR_SCHED_SCAN_MATCH, matchset);
+	if (flags)
+		NLA_PUT_U32(msg, NL80211_ATTR_SCAN_FLAGS, flags);
+
+nla_put_failure:
+	if (match)
+		nla_nest_end(msg, match);
+	nlmsg_free(freqs);
+	nlmsg_free(matchset);
+
+out:
+	*argc = c;
+	*argv = v;
+	return err;
+}
+
 static int handle_scan(struct nl80211_state *state,
 		       struct nl_cb *cb,
 		       struct nl_msg *msg,
@@ -92,7 +358,7 @@ static int handle_scan(struct nl80211_state *state,
 	bool passive = false, have_ssids = false, have_freqs = false;
 	size_t ies_len = 0, meshid_len = 0;
 	unsigned char *ies = NULL, *meshid = NULL, *tmpies;
-	int flags = 0;
+	unsigned int flags = 0;
 
 	ssids = nlmsg_alloc();
 	if (!ssids)
@@ -115,16 +381,20 @@ static int handle_scan(struct nl80211_state *state,
 				parse = IES;
 				break;
 			} else if (strcmp(argv[i], "lowpri") == 0) {
-				parse = NONE;
 				flags |= NL80211_SCAN_FLAG_LOW_PRIORITY;
 				break;
 			} else if (strcmp(argv[i], "flush") == 0) {
-				parse = NONE;
 				flags |= NL80211_SCAN_FLAG_FLUSH;
 				break;
 			} else if (strcmp(argv[i], "ap-force") == 0) {
-				parse = NONE;
 				flags |= NL80211_SCAN_FLAG_AP;
+				break;
+			} else if (strncmp(argv[i], "randomise", 9) == 0 ||
+				   strncmp(argv[i], "randomize", 9) == 0) {
+				flags |= NL80211_SCAN_FLAG_RANDOM_ADDR;
+				err = parse_random_mac_addr(msg, argv[i]);
+				if (err)
+					goto nla_put_failure;
 				break;
 			} else if (strcmp(argv[i], "ssid") == 0) {
 				parse = SSID;
@@ -377,6 +647,9 @@ static void print_cipher(const uint8_t *data)
 		case 6:
 			printf("AES-128-CMAC");
 			break;
+		case 7:
+			printf("NO-GROUP");
+			break;
 		case 8:
 			printf("GCMP");
 			break;
@@ -433,24 +706,37 @@ static void print_auth(const uint8_t *data)
 				data[0], data[1] ,data[2], data[3]);
 			break;
 		}
+	} else if (memcmp(data, wfa_oui, 3) == 0) {
+		switch (data[3]) {
+		case 1:
+			printf("OSEN");
+			break;
+		default:
+			printf("%.02x-%.02x-%.02x:%d",
+				data[0], data[1] ,data[2], data[3]);
+			break;
+		}
 	} else
 		printf("%.02x-%.02x-%.02x:%d",
 			data[0], data[1] ,data[2], data[3]);
 }
 
-static void print_rsn_ie(const char *defcipher, const char *defauth,
-			 uint8_t len, const uint8_t *data)
+static void _print_rsn_ie(const char *defcipher, const char *defauth,
+			  uint8_t len, const uint8_t *data, int is_osen)
 {
 	bool first = true;
-	__u16 version, count, capa;
+	__u16 count, capa;
 	int i;
 
-	version = data[0] + (data[1] << 8);
-	tab_on_first(&first);
-	printf("\t * Version: %d\n", version);
+	if (!is_osen) {
+		__u16 version;
+		version = data[0] + (data[1] << 8);
+		tab_on_first(&first);
+		printf("\t * Version: %d\n", version);
 
-	data += 2;
-	len -= 2;
+		data += 2;
+		len -= 2;
+	}
 
 	if (len < 4) {
 		tab_on_first(&first);
@@ -592,6 +878,19 @@ static void print_rsn_ie(const char *defcipher, const char *defauth,
 		}
 		printf("\n");
 	}
+}
+
+static void print_rsn_ie(const char *defcipher, const char *defauth,
+			 uint8_t len, const uint8_t *data)
+{
+	_print_rsn_ie(defcipher, defauth, len, data, 0);
+}
+
+static void print_osen_ie(const char *defcipher, const char *defauth,
+			  uint8_t len, const uint8_t *data)
+{
+	printf("\n\t");
+	_print_rsn_ie(defcipher, defauth, len, data, 1);
 }
 
 static void print_rsn(const uint8_t type, uint8_t len, const uint8_t *data)
@@ -1043,6 +1342,11 @@ static void print_wifi_wpa(const uint8_t type, uint8_t len, const uint8_t *data)
 	print_rsn_ie("TKIP", "IEEE 802.1X", len, data);
 }
 
+static void print_wifi_osen(const uint8_t type, uint8_t len, const uint8_t *data)
+{
+	print_osen_ie("OSEN", "OSEN", len, data);
+}
+
 static bool print_wifi_wmm_param(const uint8_t *data, uint8_t len)
 {
 	int i;
@@ -1396,6 +1700,7 @@ static inline void print_hs20_ind(const uint8_t type, uint8_t len, const uint8_t
 static const struct ie_print wfa_printers[] = {
 	[9] = { "P2P", print_p2p, 2, 255, BIT(PRINT_SCAN), },
 	[16] = { "HotSpot 2.0 Indication", print_hs20_ind, 1, 255, BIT(PRINT_SCAN), },
+	[18] = { "HotSpot 2.0 OSEN", print_wifi_osen, 1, 255, BIT(PRINT_SCAN), },
 };
 
 static void print_vendor(unsigned char len, unsigned char *data,
@@ -1763,7 +2068,7 @@ static int handle_scan_combined(struct nl80211_state *state,
 	dump_argv[0] = argv[0];
 	return handle_cmd(state, id, dump_argc, dump_argv);
 }
-TOPLEVEL(scan, "[-u] [freq <freq>*] [ies <hex as 00:11:..>] [meshid <meshid>] [lowpri,flush,ap-force] [ssid <ssid>*|passive]", 0, 0,
+TOPLEVEL(scan, "[-u] [freq <freq>*] [ies <hex as 00:11:..>] [meshid <meshid>] [lowpri,flush,ap-force] [randomise[=<addr>/<mask>]] [ssid <ssid>*|passive]", 0, 0,
 	 CIB_NETDEV, handle_scan_combined,
 	 "Scan on the given frequencies and probe for the given SSIDs\n"
 	 "(or wildcard if not given) unless passive scanning is requested.\n"
@@ -1773,7 +2078,36 @@ COMMAND(scan, dump, "[-u]",
 	NL80211_CMD_GET_SCAN, NLM_F_DUMP, CIB_NETDEV, handle_scan_dump,
 	"Dump the current scan results. If -u is specified, print unknown\n"
 	"data in scan results.");
-COMMAND(scan, trigger, "[freq <freq>*] [ies <hex as 00:11:..>] [meshid <meshid>] [lowpri,flush,ap-force] [ssid <ssid>*|passive]",
+COMMAND(scan, trigger, "[freq <freq>*] [ies <hex as 00:11:..>] [meshid <meshid>] [lowpri,flush,ap-force] [randomise[=<addr>/<mask>]] [ssid <ssid>*|passive]",
 	NL80211_CMD_TRIGGER_SCAN, 0, CIB_NETDEV, handle_scan,
 	 "Trigger a scan on the given frequencies with probing for the given\n"
 	 "SSIDs (or wildcard if not given) unless passive scanning is requested.");
+
+
+static int handle_start_sched_scan(struct nl80211_state *state,
+				   struct nl_cb *cb, struct nl_msg *msg,
+				   int argc, char **argv, enum id_input id)
+{
+	return parse_sched_scan(msg, &argc, &argv);
+}
+
+static int handle_stop_sched_scan(struct nl80211_state *state, struct nl_cb *cb,
+				  struct nl_msg *msg, int argc, char **argv,
+				  enum id_input id)
+{
+	if (argc != 0)
+		return 1;
+
+	return 0;
+}
+
+COMMAND(scan, sched_start,
+	SCHED_SCAN_OPTIONS,
+	NL80211_CMD_START_SCHED_SCAN, 0, CIB_NETDEV, handle_start_sched_scan,
+	"Start a scheduled scan at the specified interval on the given frequencies\n"
+	"with probing for the given SSIDs (or wildcard if not given) unless passive\n"
+	"scanning is requested.  If matches are specified, only matching results\n"
+	"will be returned.");
+COMMAND(scan, sched_stop, "",
+	NL80211_CMD_STOP_SCHED_SCAN, 0, CIB_NETDEV, handle_stop_sched_scan,
+	"Stop an ongoing scheduled scan.");

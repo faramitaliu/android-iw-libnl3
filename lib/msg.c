@@ -32,6 +32,7 @@
 #include <netlink/cache.h>
 #include <netlink/attr.h>
 #include <linux/socket.h>
+#include <unistd.h>
 
 static size_t default_msg_size;
 
